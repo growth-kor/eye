@@ -1,0 +1,401 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>THE WATCHFUL EYE - 대표님을 수호하는 감시의 눈</title>
+<style>
+  * {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+    user-select: none;
+  }
+  body {
+    background-color: #050608;
+    color: #00ff66;
+    font-family: 'Courier New', Courier, monospace;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    min-height: 100vh;
+    overflow: hidden;
+    position: relative;
+  }
+
+  /* CRT 스캔라인 & 비네팅 효과 */
+  body::before {
+    content: " ";
+    position: absolute;
+    top: 0; left: 0; bottom: 0; right: 0;
+    background: linear-gradient(rgba(18, 16, 16, 0) 50%, rgba(0, 0, 0, 0.4) 50%),
+                linear-gradient(90deg, rgba(255, 0, 0, 0.03), rgba(0, 255, 0, 0.01), rgba(0, 0, 255, 0.03));
+    background-size: 100% 3px, 6px 100%;
+    z-index: 20;
+    pointer-events: none;
+  }
+  body::after {
+    content: "";
+    position: absolute;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background: radial-gradient(circle at center, transparent 40%, rgba(0, 0, 0, 0.85) 100%);
+    pointer-events: none;
+    z-index: 21;
+  }
+
+  .hud-top {
+    position: absolute;
+    top: 24px;
+    font-size: 13px;
+    letter-spacing: 2px;
+    color: #4ade80;
+    opacity: 0.8;
+    z-index: 10;
+    text-shadow: 0 0 8px rgba(74, 222, 128, 0.6);
+  }
+
+  .eye-container {
+    position: relative;
+    padding: 20px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 5;
+  }
+
+  #ascii-eye {
+    font-family: 'Courier New', Courier, monospace;
+    white-space: pre;
+    font-size: 13px;
+    line-height: 12px;
+    letter-spacing: 0px;
+    color: #22c55e;
+    text-shadow: 0 0 10px rgba(34, 197, 94, 0.7), 0 0 20px rgba(34, 197, 94, 0.3);
+    transition: color 0.15s ease, text-shadow 0.15s ease;
+  }
+
+  .status-panel {
+    position: absolute;
+    top: 80%;
+    left: 50%;
+    text-align: center;
+    z-index: 10;
+    pointer-events: none;
+    white-space: nowrap;
+    will-change: left, top;
+  }
+
+  .status-title {
+    font-size: 20px;
+    font-weight: bold;
+    letter-spacing: 6px;
+    color: #86efac;
+    text-transform: uppercase;
+    text-shadow: 0 0 14px rgba(134, 239, 172, 0.8);
+    transition: color 0.3s ease, text-shadow 0.3s ease;
+  }
+
+  /* 깜빡임 애니메이션 (눈동자 깜빡일 때) */
+  .blinking {
+    filter: brightness(1.6);
+  }
+</style>
+</head>
+<body>
+
+<div class="hud-top" id="clock">00:00:00.00</div>
+
+<div class="eye-container">
+  <pre id="ascii-eye"></pre>
+</div>
+
+<div class="status-panel">
+  <div class="status-title">I'M WATCHING YOU</div>
+</div>
+
+<script>
+// 실시간 현재 시간 (초 아래 밀리초 2자리 단위까지 정밀 표시)
+function updateClock() {
+  const now = new Date();
+  const h = String(now.getHours()).padStart(2, '0');
+  const m = String(now.getMinutes()).padStart(2, '0');
+  const s = String(now.getSeconds()).padStart(2, '0');
+  const ms = String(Math.floor(now.getMilliseconds() / 10)).padStart(2, '0');
+  document.getElementById('clock').innerText = `${h}:${m}:${s}.${ms}`;
+}
+setInterval(updateClock, 30);
+updateClock();
+
+// 화면 잠자기 모드 방지 (Screen Wake Lock API)
+let wakeLock = null;
+async function requestWakeLock() {
+  try {
+    if ('wakeLock' in navigator) {
+      wakeLock = await navigator.wakeLock.request('screen');
+      console.log('Screen Wake Lock is active. (잠자기 방지 활성화)');
+    }
+  } catch (err) {
+    console.warn('Wake Lock request error:', err);
+  }
+}
+requestWakeLock();
+
+// 탭 전환 후 복귀 시 잠자기 방지 재활성화
+document.addEventListener('visibilitychange', async () => {
+  if (wakeLock !== null && document.visibilityState === 'visible') {
+    await requestWakeLock();
+  }
+});
+window.addEventListener('click', requestWakeLock);
+window.addEventListener('keydown', requestWakeLock);
+
+// 동적 ASCII 렌더링 엔진
+const width = 101;  // 가로 문자 수
+const height = 37;  // 세로 행 수
+const eyeRx = 47;   // 눈꺼풀 가로 반경
+const eyeRy = 16.5; // 눈꺼풀 세로 반경 (상하 볼륨감 대폭 확대)
+const irisR = 9.2;  // 홍채 반경
+const pupilR = 4.0; // 동공 반경
+
+let targetX = 0; // -1 ~ 1
+let targetY = 0; // -1 ~ 1
+let currentX = 0;
+let currentY = 0;
+let blinkProgress = 0; // 0 (떠있음) ~ 1 (감김)
+let isBlinking = false;
+
+let lastMouseMoveTime = performance.now();
+let isIdleMode = false;
+
+// DVD 바운스 물리 파라미터 (고전 브라운관 TV 화면보호기)
+const statusPanel = document.querySelector('.status-panel');
+const titleElem = document.querySelector('.status-title');
+let dvdX = window.innerWidth / 2 - 100;
+let dvdY = window.innerHeight - 80;
+let dvdVx = 2.4; // 가로 속도
+let dvdVy = 1.9; // 세로 속도
+const dvdColors = ['#86efac', '#38bdf8', '#c084fc', '#f472b6', '#facc15', '#4ade80'];
+let dvdColorIdx = 0;
+
+// 마우스 움직임 추적 (대표님이 마우스를 움직이면 커서 응시, 가만히 두면 날아다니는 문구 응시)
+window.addEventListener('mousemove', (e) => {
+  lastMouseMoveTime = performance.now();
+  const normX = (e.clientX / window.innerWidth) * 2 - 1;
+  const normY = (e.clientY / window.innerHeight) * 2 - 1;
+  targetX = Math.max(-0.85, Math.min(0.85, normX));
+  targetY = Math.max(-0.65, Math.min(0.65, normY));
+});
+
+// 주기적 눈 깜빡임 (자연스러운 유기체 느낌)
+function triggerBlink() {
+  if (isBlinking) return;
+  isBlinking = true;
+  let startTime = performance.now();
+  const blinkDuration = 180; // 180ms
+
+  function step(time) {
+    const elapsed = time - startTime;
+    if (elapsed < blinkDuration) {
+      const half = blinkDuration / 2;
+      if (elapsed < half) {
+        blinkProgress = elapsed / half;
+      } else {
+        blinkProgress = 1 - (elapsed - half) / half;
+      }
+      requestAnimationFrame(step);
+    } else {
+      blinkProgress = 0;
+      isBlinking = false;
+      scheduleNextBlink();
+    }
+  }
+  requestAnimationFrame(step);
+}
+
+function scheduleNextBlink() {
+  const delay = 2200 + Math.random() * 3500;
+  setTimeout(triggerBlink, delay);
+}
+scheduleNextBlink();
+
+// 클릭 시 깜짝 놀라 동공 확대 및 빠른 깜빡임
+window.addEventListener('mousedown', () => {
+  triggerBlink();
+});
+
+// F 키 (한글 'ㄹ' 상태 포함)로 전체화면 모드 토글
+window.addEventListener('keydown', (e) => {
+  if (e.key === 'f' || e.key === 'F' || e.key === 'ㄹ' || e.code === 'KeyF') {
+    if (!document.fullscreenElement) {
+      document.documentElement.requestFullscreen().catch((err) => {
+        console.error('Fullscreen request failed:', err);
+      });
+    } else {
+      if (document.exitFullscreen) {
+        document.exitFullscreen();
+      }
+    }
+  }
+});
+
+function render(timestamp) {
+  const now = performance.now();
+
+  // 📺 [문구는 마우스 움직임과 무관하게 상시 24시간 화면을 튕겨 다니며 유영]
+  dvdX += dvdVx;
+  dvdY += dvdVy;
+
+  const panelW = statusPanel.offsetWidth || 240;
+  const panelH = statusPanel.offsetHeight || 30;
+
+  let bounced = false;
+  // 좌우 벽 충돌
+  if (dvdX <= 15) {
+    dvdX = 15;
+    dvdVx = Math.abs(dvdVx);
+    bounced = true;
+  } else if (dvdX + panelW >= window.innerWidth - 15) {
+    dvdX = window.innerWidth - panelW - 15;
+    dvdVx = -Math.abs(dvdVx);
+    bounced = true;
+  }
+
+  // 상하 벽 충돌 (상단 시계 영역 65px 보호)
+  if (dvdY <= 65) {
+    dvdY = 65;
+    dvdVy = Math.abs(dvdVy);
+    bounced = true;
+  } else if (dvdY + panelH >= window.innerHeight - 25) {
+    dvdY = window.innerHeight - panelH - 25;
+    dvdVy = -Math.abs(dvdVy);
+    bounced = true;
+  }
+
+  // 모서리/벽 튕길 때마다 고전 DVD 로고처럼 감각적으로 컬러 체인지
+  if (bounced) {
+    dvdColorIdx = (dvdColorIdx + 1) % dvdColors.length;
+    const nextCol = dvdColors[dvdColorIdx];
+    titleElem.style.color = nextCol;
+    titleElem.style.textShadow = `0 0 16px ${nextCol}`;
+  }
+
+  statusPanel.style.left = `${dvdX}px`;
+  statusPanel.style.top = `${dvdY}px`;
+
+  // 👁️ [눈동자 추적 로직]: 마우스 움직임이 2.5초 이상 없으면 날아다니는 문구를 눈동자가 따라가서 봄!
+  if (now - lastMouseMoveTime > 2500) {
+    const textCenterX = dvdX + panelW / 2;
+    const textCenterY = dvdY + panelH / 2;
+    const normTextX = (textCenterX / window.innerWidth) * 2 - 1;
+    const normTextY = (textCenterY / window.innerHeight) * 2 - 1;
+
+    targetX = Math.max(-0.85, Math.min(0.85, normTextX));
+    targetY = Math.max(-0.65, Math.min(0.65, normTextY));
+  }
+
+  // 스무스 보간
+  currentX += (targetX - currentX) * 0.10;
+  currentY += (targetY - currentY) * 0.10;
+
+  const centerX = (width - 1) / 2;
+  const centerY = (height - 1) / 2;
+
+  // 동공 위치 (눈 안에서 움직이는 중심)
+  const pupilOffsetX = currentX * 16;
+  const pupilOffsetY = currentY * 6;
+  const pX = centerX + pupilOffsetX;
+  const pY = centerY + pupilOffsetY;
+
+  // 눈 깜빡임에 따른 세로 높이 변화
+  const blinkScale = Math.max(0.04, 1.0 - blinkProgress * 0.96);
+
+  let output = "";
+
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const dx = (x - centerX) / eyeRx;
+      const absDx = Math.abs(dx);
+
+      if (absDx >= 0.99) {
+        output += " ";
+        continue;
+      }
+
+      // [원호 삼각함수 곡선] y = eyeRy * cos(dx * PI / 2) -> 상하에 수평 일자 구간이 0%인 완벽한 곡선 돔
+      const cosArch = Math.cos(dx * Math.PI * 0.5);
+      const topY = centerY - eyeRy * cosArch * blinkScale;
+      const botY = centerY + eyeRy * cosArch * blinkScale;
+
+      const dyTop = Math.abs(y - topY);
+      const dyBot = Math.abs(y - botY);
+
+      if (y >= topY && y <= botY) {
+        // [눈 내부] - 흰자위, 홍채, 동공, 반사광
+        const dpx = (x - pX);
+        const dpy = (y - pY) * 1.55; // 세로 정방형 보정
+        const distToPupil = Math.sqrt(dpx * dpx + dpy * dpy);
+
+        // 반사광 하이라이트 (빛나는 생기)
+        const glintDist = Math.sqrt(Math.pow(x - (pX - 2.2), 2) + Math.pow((y - (pY - 1.5)) * 1.5, 2));
+
+        if (glintDist < 1.3) {
+          output += "█";
+        } else if (distToPupil < pupilR) {
+          output += "@";
+        } else if (distToPupil < irisR) {
+          const angle = Math.atan2(dpy, dpx);
+          const pattern = Math.sin(angle * 12) * Math.cos(distToPupil * 1.3);
+          if (distToPupil < irisR * 0.7) {
+            output += (pattern > 0) ? "▓" : "▒";
+          } else {
+            output += (pattern > 0) ? "▒" : "░";
+          }
+        } else if (distToPupil < irisR + 1.2) {
+          output += "│";
+        } else {
+          // 공막 (흰자위) 디테일 & 양끝 눈꼬리 음영
+          if (absDx > 0.82) {
+            output += (dx < 0) ? "<" : ">";
+          } else if (Math.min(dyTop, dyBot) < 1.5) {
+            output += "·";
+          } else if (x % 9 === 0 && Math.abs(y - centerY) < 4) {
+            output += "~";
+          } else {
+            output += " ";
+          }
+        }
+      } else if (dyTop < 1.2 || dyBot < 1.2) {
+        // [눈꺼풀 메인 테두리] - 곡선 기울기에 따른 자연스러운 아스키 기호
+        if (blinkProgress > 0.6) {
+          output += "═";
+        } else if (absDx < 0.15) {
+          output += (y < centerY) ? "⌒" : "‿";
+        } else if (dx < 0) {
+          output += (y < centerY) ? "╱" : "╲";
+        } else {
+          output += (y < centerY) ? "╲" : "╱";
+        }
+      } else if (dyTop < 2.5 || dyBot < 2.5) {
+        // [쌍꺼풀 / 애교살 라인]
+        if (cosArch > 0.2) {
+          output += (y < centerY) ? "¨" : "․";
+        } else {
+          output += " ";
+        }
+      } else {
+        output += " ";
+      }
+    }
+    output += "\n";
+  }
+
+  document.getElementById('ascii-eye').textContent = output;
+  requestAnimationFrame(render);
+}
+
+requestAnimationFrame(render);
+</script>
+
+</body>
+</html>
